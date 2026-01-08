@@ -9,7 +9,7 @@ from django.contrib.auth.forms import UserChangeForm
 from django.core.paginator import Paginator
 from django.db.models import Count
 from .models import Post, Category, Comment
-from .forms import PostForm, CommentForm
+from .forms import PostForm, CommentForm, ProfileEditForm
 
 
 def index(request):
@@ -19,48 +19,33 @@ def index(request):
         pub_date__lte=timezone.now(),
         is_published=True,
         category__is_published=True
-    ).order_by('-pub_date')[:5]
-
-    # Добавляем пагинацию (задание 3)
+    ).annotate(comment_count=Count('comments')).order_by('-pub_date')
+    
+    # Пагинация ПЕРЕД срезом
     paginator = Paginator(post_list, 10)
     page_number = request.GET.get('page')
     page_obj = paginator.get_page(page_number)
-    
-    # Добавляем количество комментариев (задание 7)
-    post_list = post_list.annotate(comment_count=Count('comments'))
     
     context = {'page_obj': page_obj}
     return render(request, 'blog/index.html', context)
 
 
+
 def post_detail(request, post_id):
-    post = get_object_or_404(
-        Post.objects.select_related('category', 'location', 'author'),
-        pk=post_id,
-        pub_date__lte=timezone.now(),
-        is_published=True,
-        category__is_published=True
-    )
+    post = get_object_or_404(Post, id=post_id)
     
-    # Добавляем комментарии и форму (задание 7)
-    comments = post.comments.all()
-    if request.method == 'POST' and request.user.is_authenticated:
-        form = CommentForm(request.POST)
-        if form.is_valid():
-            comment = form.save(commit=False)
-            comment.post = post
-            comment.author = request.user
-            comment.save()
-            return redirect('blog:post_detail', post_id=post_id)
-    else:
-        form = CommentForm()
+    form = CommentForm()
+    comments = Comment.objects.filter(post=post)
     
     context = {
         'post': post,
+        'form': form,      # ← ДОЛЖЕН БЫТЬ ПЕРВЫМ!
         'comments': comments,
-        'form': form
     }
     return render(request, 'blog/detail.html', context)
+
+
+
 
 
 def category_posts(request, category_slug):
@@ -76,21 +61,18 @@ def category_posts(request, category_slug):
         category=category,
         pub_date__lte=timezone.now(),
         is_published=True
-    ).order_by('-pub_date')
+    ).annotate(comment_count=Count('comments')).order_by('-pub_date')
     
-    # Добавляем пагинацию (задание 3)
     paginator = Paginator(post_list, 10)
     page_number = request.GET.get('page')
     page_obj = paginator.get_page(page_number)
-    
-    # Добавляем количество комментариев (задание 7)
-    post_list = post_list.annotate(comment_count=Count('comments'))
 
     context = {
         'category': category,
         'page_obj': page_obj
     }
     return render(request, 'blog/category.html', context)
+
 
 
 # 2.2 Регистрация пользователя
@@ -108,74 +90,66 @@ def register(request):
 
 # 2.3 Страница профиля пользователя
 def profile(request, username):
-    user = get_object_or_404(User, username=username)
+    profile = get_object_or_404(User, username=username)
     
-    # Базовый QuerySet для постов пользователя
-    post_list = Post.objects.filter(author=user)
+    post_list = Post.objects.filter(
+        author=profile
+    ).select_related('category', 'location').annotate(
+        comment_count=Count('comments')
+    )
     
-    # Если пользователь не владелец профиля, показываем только опубликованные посты
-    if request.user != user:
+    # Фильтрация для не-владельцев
+    if not request.user.is_authenticated or request.user != profile:
         post_list = post_list.filter(
             pub_date__lte=timezone.now(),
             is_published=True,
             category__is_published=True
         )
     
-    # Аннотация комментариев ДО пагинации
-    post_list = post_list.annotate(comment_count=Count('comments'))
+    post_list = post_list.order_by('-pub_date')
     
-    # Пагинация
     paginator = Paginator(post_list, 10)
     page_number = request.GET.get('page')
     page_obj = paginator.get_page(page_number)
     
     context = {
-        'profile': user,
+        'profile': profile,
         'page_obj': page_obj,
     }
     return render(request, 'blog/profile.html', context)
 
 
+
 # 2.4 Редактирование профиля
 @login_required
 def edit_profile(request):
-    from django.contrib.auth.forms import UserChangeForm
-    
     if request.method == 'POST':
-        form = UserChangeForm(request.POST, instance=request.user)
-        # Ограничиваем поля только нужными
-        allowed_fields = ['username', 'first_name', 'last_name', 'email']
-        for field_name in list(form.fields.keys()):
-            if field_name not in allowed_fields:
-                form.fields.pop(field_name, None)
-        
+        form = ProfileEditForm(request.POST, instance=request.user)
         if form.is_valid():
             form.save()
             return redirect('blog:profile', username=request.user.username)
     else:
-        form = UserChangeForm(instance=request.user)
-        # Ограничиваем поля только нужными
-        allowed_fields = ['username', 'first_name', 'last_name', 'email']
-        for field_name in list(form.fields.keys()):
-            if field_name not in allowed_fields:
-                form.fields.pop(field_name, None)
+        form = ProfileEditForm(instance=request.user)
     
     return render(request, 'blog/user.html', {'form': form})
+
 
 
 # 5. Создание поста
 @login_required
 def create_post(request):
+    form = PostForm()
     if request.method == 'POST':
-        form = PostForm(request.POST, request.FILES)
+        form = PostForm(request.POST, files=request.FILES)
         if form.is_valid():
             post = form.save(commit=False)
             post.author = request.user
             post.save()
-            return redirect('blog:profile', username=request.user.username)
-    else:
-        form = PostForm()
-    return render(request, 'blog/create.html', {'form': form})
+            return redirect('blog:profile', request.user.username)
+    
+    return render(request, 'blog/create.html', {'form': form})  # ← ТОЛЬКО form!
+
+
 
 
 # 6. Редактирование поста
@@ -183,7 +157,6 @@ def create_post(request):
 def edit_post(request, post_id):
     post = get_object_or_404(Post, id=post_id)
     
-    # Проверяем, что пользователь - автор поста
     if post.author != request.user:
         return HttpResponseForbidden("Вы не можете редактировать этот пост")
     
@@ -191,11 +164,12 @@ def edit_post(request, post_id):
         form = PostForm(request.POST, request.FILES, instance=post)
         if form.is_valid():
             form.save()
-            return redirect('blog:detail', post_id=post_id)
+            return redirect('blog:post_detail', post_id=post_id)  # ИСПРАВЛЕНО
     else:
         form = PostForm(instance=post)
     
     return render(request, 'blog/create.html', {'form': form, 'post': post})
+
 
 
 # 7.1 Добавление комментария
@@ -259,3 +233,13 @@ def delete_comment(request, post_id, comment_id):
         comment.delete()
     
     return redirect('blog:post_detail', post_id=post_id)
+
+def custom_page_not_found(request, exception):
+    return render(request, 'pages/404.html', status=404)
+
+def custom_permission_denied(request, exception):
+    return render(request, 'pages/403csrf.html', status=403)
+
+def custom_server_error(request):
+    return render(request, 'pages/500.html', status=500)
+
