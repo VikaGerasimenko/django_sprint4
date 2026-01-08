@@ -288,6 +288,8 @@ def _testget_context_item_by_class(
     """If `err_msg` is not empty, empty return value will
     produce an AssertionError with the `err_msg` error message"""
 
+    print(f"DEBUG: context type: {type(context)}, context: {context}")
+
     def is_a_match(val: Any):
         if inside_iter:
             try:
@@ -299,15 +301,32 @@ def _testget_context_item_by_class(
 
     matched_keyval: KeyVal = KeyVal(key=None, val=None)
     matched_keyvals: List[KeyVal] = []
-    for key, val in dict(context).items():
+    context_dict = {}
+    if isinstance(context, list):
+        for item in context:
+            if isinstance(item, dict):
+                context_dict.update(item)
+    elif isinstance(context, dict):
+        context_dict = context
+    
+    for key, val in context_dict.items():
         if is_a_match(val):
-            matched_keyval = KeyVal(key, val)
+            matched_keyval = KeyVal(key=key, val=val)
             matched_keyvals.append(matched_keyval)
-    if err_msg:
-        assert len(matched_keyvals) == 1, err_msg
-        assert matched_keyval.key, err_msg
 
-    return matched_keyval
+    if not matched_keyvals:
+        if err_msg:
+            raise AssertionError(err_msg)
+        else:
+            return matched_keyval
+
+    if len(matched_keyvals) > 1:
+        if err_msg:
+            raise AssertionError(err_msg)
+        else:
+            return matched_keyval
+
+    return matched_keyvals[0]
 
 
 def _testget_context_item_by_key(context, key: str, err_msg: str) -> KeyVal:
