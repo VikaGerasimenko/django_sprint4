@@ -5,7 +5,6 @@ from django.http import HttpResponseForbidden
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.models import User
 from django.contrib.auth.forms import UserCreationForm
-from django.contrib.auth.forms import UserChangeForm
 from django.core.paginator import Paginator
 from django.db.models import Count
 from .models import Post, Category, Comment
@@ -21,7 +20,6 @@ def index(request):
         category__is_published=True
     ).annotate(comment_count=Count('comments')).order_by('-pub_date')
     
-    # Пагинация ПЕРЕД срезом
     paginator = Paginator(post_list, 10)
     page_number = request.GET.get('page')
     page_obj = paginator.get_page(page_number)
@@ -30,22 +28,33 @@ def index(request):
     return render(request, 'blog/index.html', context)
 
 
-
 def post_detail(request, post_id):
-    post = get_object_or_404(Post, id=post_id)
+    post = get_object_or_404(
+        Post.objects.select_related('category', 'location', 'author'),
+        pk=post_id, pub_date__lte=timezone.now(), is_published=True, 
+        category__is_published=True
+    )
     
     form = CommentForm()
-    comments = Comment.objects.filter(post=post)
+    comments = post.comments.select_related('author').all()
+    
+    if request.method == 'POST' and request.user.is_authenticated:
+        form = CommentForm(request.POST)
+        if form.is_valid():
+            comment = form.save(commit=False)
+            comment.post = post
+            comment.author = request.user
+            comment.save()
+            return redirect('blog:post_detail', post_id=post_id)
     
     context = {
+        'form': form,
         'post': post,
-        'form': form,      # ← ДОЛЖЕН БЫТЬ ПЕРВЫМ!
         'comments': comments,
     }
+    
+    from django.template import RequestContext
     return render(request, 'blog/detail.html', context)
-
-
-
 
 
 def category_posts(request, category_slug):
@@ -74,8 +83,6 @@ def category_posts(request, category_slug):
     return render(request, 'blog/category.html', context)
 
 
-
-# 2.2 Регистрация пользователя
 def register(request):
     if request.method == 'POST':
         form = UserCreationForm(request.POST)
@@ -88,18 +95,16 @@ def register(request):
     return render(request, 'registration/registration_form.html', {'form': form})
 
 
-# 2.3 Страница профиля пользователя
 def profile(request, username):
-    profile = get_object_or_404(User, username=username)
+    profile_user = get_object_or_404(User, username=username)
     
     post_list = Post.objects.filter(
-        author=profile
+        author=profile_user
     ).select_related('category', 'location').annotate(
         comment_count=Count('comments')
     )
     
-    # Фильтрация для не-владельцев
-    if not request.user.is_authenticated or request.user != profile:
+    if not request.user.is_authenticated or request.user != profile_user:
         post_list = post_list.filter(
             pub_date__lte=timezone.now(),
             is_published=True,
@@ -113,14 +118,12 @@ def profile(request, username):
     page_obj = paginator.get_page(page_number)
     
     context = {
-        'profile': profile,
+        'profile': profile_user,
         'page_obj': page_obj,
     }
     return render(request, 'blog/profile.html', context)
 
 
-
-# 2.4 Редактирование профиля
 @login_required
 def edit_profile(request):
     if request.method == 'POST':
@@ -134,25 +137,21 @@ def edit_profile(request):
     return render(request, 'blog/user.html', {'form': form})
 
 
-
-# 5. Создание поста
 @login_required
 def create_post(request):
-    form = PostForm()
     if request.method == 'POST':
-        form = PostForm(request.POST, files=request.FILES)
+        form = PostForm(request.POST, request.FILES)
         if form.is_valid():
             post = form.save(commit=False)
             post.author = request.user
             post.save()
-            return redirect('blog:profile', request.user.username)
+            return redirect('blog:profile', username=request.user.username)
+    else:
+        form = PostForm()
     
-    return render(request, 'blog/create.html', {'form': form})  # ← ТОЛЬКО form!
+    return render(request, 'blog/create.html', {'form': form})
 
 
-
-
-# 6. Редактирование поста
 @login_required
 def edit_post(request, post_id):
     post = get_object_or_404(Post, id=post_id)
@@ -164,18 +163,23 @@ def edit_post(request, post_id):
         form = PostForm(request.POST, request.FILES, instance=post)
         if form.is_valid():
             form.save()
-            return redirect('blog:post_detail', post_id=post_id)  # ИСПРАВЛЕНО
+            return redirect('blog:post_detail', post_id=post_id)
     else:
         form = PostForm(instance=post)
     
     return render(request, 'blog/create.html', {'form': form, 'post': post})
 
 
-
-# 7.1 Добавление комментария
 @login_required
 def add_comment(request, post_id):
-    post = get_object_or_404(Post, id=post_id)
+    post = get_object_or_404(
+        Post.objects.select_related('category', 'location', 'author'),
+        id=post_id,
+        pub_date__lte=timezone.now(),
+        is_published=True,
+        category__is_published=True
+    )
+    
     if request.method == 'POST':
         form = CommentForm(request.POST)
         if form.is_valid():
@@ -183,15 +187,15 @@ def add_comment(request, post_id):
             comment.post = post
             comment.author = request.user
             comment.save()
-    return redirect('blog:post_detail', post_id=post_id)
+        return redirect('blog:post_detail', post_id=post_id)
+    
+    raise Http404("Страница не найдена")
 
 
-# 7.2 Редактирование комментария
 @login_required
 def edit_comment(request, post_id, comment_id):
     comment = get_object_or_404(Comment, id=comment_id, post_id=post_id)
     
-    # Проверяем, что пользователь - автор комментария
     if comment.author != request.user:
         return HttpResponseForbidden("Вы не можете редактировать этот комментарий")
     
@@ -206,7 +210,6 @@ def edit_comment(request, post_id, comment_id):
     return render(request, 'blog/comment.html', {'form': form, 'comment': comment})
 
 
-# 8.1 Удаление поста
 @login_required
 def delete_post(request, post_id):
     post = get_object_or_404(Post, id=post_id)
@@ -221,7 +224,6 @@ def delete_post(request, post_id):
     return render(request, 'blog/detail.html', {'post': post})
 
 
-# 8.2 Удаление комментария
 @login_required
 def delete_comment(request, post_id, comment_id):
     comment = get_object_or_404(Comment, id=comment_id, post_id=post_id)
@@ -242,4 +244,3 @@ def custom_permission_denied(request, exception):
 
 def custom_server_error(request):
     return render(request, 'pages/500.html', status=500)
-

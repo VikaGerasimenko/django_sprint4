@@ -8,9 +8,9 @@ from django.views.defaults import (
     server_error
 )
 
-handler404 = 'blog.views.custom_page_not_found'  # ← Кастомный!
+handler404 = 'blog.views.custom_page_not_found'
 handler403 = 'blog.views.custom_permission_denied'
-handler500 = 'blog.views.custom_server_error'    # ← Кастомный!
+handler500 = 'blog.views.custom_server_error'
 
 urlpatterns = [
     path('admin/', admin.site.urls),
